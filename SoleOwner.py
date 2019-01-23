@@ -14,11 +14,11 @@ el = 15 # Lenght of habitat
 w_0 = 0.01   # Cost per unit of fishing effort
 w_1 = 0.001
 p = 1
-case = 3
-N = 90
-N_plot = 1000
-lr = el*0.8
-tau_ns = 0.40
+#case = 1
+N = 150
+N_plot = 10000
+lr = 6
+t_ns = 0.0
 x = linspace(-el/2,el/2,N) #Habitat for PDE
 z = linspace(-el/2,el/2,N_plot) # Habitat for plots
 h = el/N
@@ -34,35 +34,45 @@ def div_diff2(g):
     return (g[:-2] + g[2:] - 2*g[1:-1])/h**2
 
 # Fishing effort tax
-def tau(case,u,lt,gamma_0,gamma_1):
-    if case == 1: # nonspatial effort tax
-        tau = zeros(u.size)
-        tau[:] = tau_ns
-        return tau
-    elif case == 2: # tax and reserve
-        tau = zeros(min(x.size,u.size))
-        y = x
-        if u.size < x.size:
-            y = x[1:-1]
-        tau += (abs(y) < lr ) * tau_ns
-        return tau
-    elif case == 3:
-        tau = 1/2*(p*u - w_0 + lt*(gamma_0*u + gamma_1*u*u + u))
-        return tau
-                 
+
+def tau_3(u,lt,gamma_0,gamma_1): # Spatial tax
+    tau = 1/2*(p*u - w_0 + lt*(gamma_0*u + gamma_1*u*u + u))
+    return tau
+
 # Fishing effort
-def f_so(u,lt,gamma_0,gamma_1):
-    fstar = ( p*u - w_0 - tau(case,u,lt,gamma_0,gamma_1) )/w_1
+def f_so_ns(u,case): # non-spatial
+    fstar = ( p*u - w_0 - t_ns )/w_1
+    if case == 2:
+        y = asarray(x)
+        if u.size < x.size:
+            y = y[1:-1]
+        fstar -= (abs(y) < lr) * fstar
+    return maximum(fstar,zeros(fstar.size))
+    
+def f_so_3(u,lt,gamma_0,gamma_1): # spatial tax
+    fstar = ( p*u - w_0 - tau_3(u,lt,gamma_0,gamma_1) )/w_1
     return maximum(fstar,zeros(fstar.size))
 
 # PDEs -> ODEs + boundary conditions
-def odesfnc(y,t,gamma_0,gamma_1):
+def odesfnc_ns(y,t,gamma_0,gamma_1,case):
+    u_res = y[:N-2]
+    u = concatenate([[0],u_res,[0]])
+    f_res = f_so_ns(u_res,case)
+    f = f_so_ns(u,case)
+    y3 = y[N-2:2*N-2]
+    y4 = y[2*N-2:3*N-2]
+    du = (y3[1:-1] - y4[1:-1]*u_res)*u_res - f_res*u_res + div_diff2(u)
+    dy3 = 1/2*(1 - gamma_0*f - y3)
+    dy4 = 1/2*(1 + gamma_1*f - y4)
+    return concatenate([du,dy3,dy4])
+
+def odesfnc_3(y,t,gamma_0,gamma_1):
     u_res = y[:N-2]
     lt_res = y[N-2:2*N-4]
     u = concatenate([[0],u_res,[0]])
     lt = concatenate([[0],lt_res,[0]])
-    f_res = f_so(u_res,lt_res,gamma_0,gamma_1)
-    f = f_so(u,lt,gamma_0,gamma_1)
+    f_res = f_so_3(u_res,lt_res,gamma_0,gamma_1)
+    f = f_so_3(u,lt,gamma_0,gamma_1)
     y3 = y[2*N-4:3*N-4]
     y4 = y[3*N-4:4*N-4]
     du = (y3[1:-1] - y4[1:-1]*u_res)*u_res - f_res*u_res + div_diff2(u)
@@ -72,7 +82,15 @@ def odesfnc(y,t,gamma_0,gamma_1):
     return concatenate([du,dlambda,dy3,dy4])
 
 # Initial conditions randomized
-def icfnc():
+def icfnc_ns():
+    u0 = 0.5*(1+(2*rand(x.size-2)-1))
+    y30 = zeros(x.size)
+    y40 = zeros(x.size)
+    y30[:] = 0.01
+    y40[:] = 0.01
+    return concatenate([u0,y30,y40])
+
+def icfnc_3():
     u0 = 0.5*(1+(2*rand(x.size-2)-1))
     lt0 = 0.5*(1+(2*rand(x.size-2)-1))
     y30 = zeros(x.size)
@@ -82,18 +100,27 @@ def icfnc():
     return concatenate([u0,lt0,y30,y40])
 
 # Solver
-def solve_model(t_end,nt,gamma_0,gamma_1):
+def solve_model(function,init,t_end,nt,gamma_0,gamma_1):
     tspan = linspace(0,t_end,nt)
     print('Choice of gamma_0 = %.2f ' % gamma_0)
     print('Choice of gamma_1 = %.2f ' % gamma_1)
     print('Running model until t = %.0f s' % t_end) 
     tic = time()
-    function = lambda y,t: odesfnc(y,t,gamma_0 = gamma_0,gamma_1 = gamma_1)
-    sol = odeint(function,icfnc(),tspan)
+    sol = odeint(function,init,tspan,ml = 1, mu = 2)
     print('Solution in %.0f s' % (time()-tic))
     return sol
 
-def final_sol(sol):
+def final_sol_ns(sol,case):
+    u = concatenate([[0],sol[-1,:N-2],[0]])
+    lambda_v = concatenate([[0],sol[-1,N-2:2*N-4],[0]])
+    f = f_so_ns(u,case)
+    fu = interp1d(x,u,kind = 'cubic')
+    ff = interp1d(x,f,kind = 'cubic')
+    #f3 = interp1d(x,y3,kind = 'cubic') # Don't need them
+    #f4 = interp1d(x,y4,kind = 'cubic')
+    return [fu(z),maximum(ff(z),zeros(z.size))] #,f3(z),yf4(z)]
+
+def final_sol_3(sol):
     u = concatenate([[0],sol[-1,:N-2],[0]])
     lambda_v = concatenate([[0],sol[-1,N-2:2*N-4],[0]])
     y3 = sol[-1,:2*N-4:3*N-4]
